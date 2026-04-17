@@ -1,0 +1,232 @@
+---
+title: "Lab6"
+output: html_document
+date: "2026-04-17"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+# Link de GitHub:
+https://github.com/SaintPage/Lab6_DM
+
+
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(janitor)
+library(lubridate)
+library(stringr)
+library(broom)
+```
+
+```{r}
+tmp_env <- new.env()
+load("listings.RData", envir = tmp_env)
+
+objetos <- mget(ls(tmp_env), envir = tmp_env)
+
+listings <- objetos %>%
+  keep(~ is.data.frame(.x)) %>%
+  .[[1]]
+
+dim(listings)
+glimpse(listings)
+```
+
+```{r}
+parse_money_clean <- function(x) {
+  if (is.numeric(x)) return(x)
+  x %>%
+    as.character() %>%
+    str_replace_all("\\$", "") %>%
+    str_replace_all(",", "") %>%
+    str_trim() %>%
+    na_if("") %>%
+    as.numeric()
+}
+
+parse_percent_clean <- function(x) {
+  if (is.numeric(x)) return(x)
+  x %>%
+    as.character() %>%
+    str_replace_all("%", "") %>%
+    str_trim() %>%
+    na_if("") %>%
+    as.numeric()
+}
+
+listings <- listings %>%
+  clean_names()
+
+if ("price" %in% names(listings)) {
+  listings <- listings %>%
+    mutate(price = parse_money_clean(price))
+}
+
+
+if ("host_response_rate" %in% names(listings)) {
+  listings <- listings %>%
+    mutate(host_response_rate = parse_percent_clean(host_response_rate))
+}
+
+if ("host_acceptance_rate" %in% names(listings)) {
+  listings <- listings %>%
+    mutate(host_acceptance_rate = parse_percent_clean(host_acceptance_rate))
+}
+
+cols_fecha <- c("host_since", "first_review", "last_review", "last_scraped")
+cols_fecha <- cols_fecha[cols_fecha %in% names(listings)]
+
+if (length(cols_fecha) > 0) {
+  listings <- listings %>%
+    mutate(across(all_of(cols_fecha), ~ suppressWarnings(ymd(.x))))
+}
+
+listings <- listings %>%
+  select(where(~ !is.list(.x))) %>%
+  mutate(across(where(is.character), as.factor))
+
+summary(listings$price)
+```
+
+
+# 1. Cree una variable dicotómica por cada una de las categorías de la variable respuesta categórica que creó en hojas anteriores. Debería tener 3 variables dicotómicas (valores 0 y 1) una que diga si el airbnb es caro o no, medio o no, económico o no.
+
+```{r}
+listings <- listings %>%
+  clean_names()
+
+if ("price" %in% names(listings)) {
+  listings <- listings %>%
+    mutate(price = parse_money_clean(price)) %>%
+    mutate(
+      categoria_precio = case_when(
+        is.na(price)               ~ NA_character_,
+        price <= 119               ~ "Barata",
+        price > 119 & price <= 323 ~ "Media",
+        price > 323                ~ "Cara"
+      ),
+      airbnb_barata = case_when(
+        is.na(price)               ~ NA_integer_,
+        price <= 119               ~ 1L,
+        TRUE                       ~ 0L
+      ),
+      airbnb_media = case_when(
+        is.na(price)               ~ NA_integer_,
+        price > 119 & price <= 323 ~ 1L,
+        TRUE                       ~ 0L
+      ),
+      airbnb_cara = case_when(
+        is.na(price)               ~ NA_integer_,
+        price > 323                ~ 1L,
+        TRUE                       ~ 0L
+      )
+    ) %>%
+    mutate(
+      categoria_precio = factor(
+        categoria_precio,
+        levels = c("Barata", "Media", "Cara")
+      )
+    )
+}
+```
+
+```{r}
+table(listings$categoria_precio, useNA = "ifany")
+
+table(listings$airbnb_barata, useNA = "ifany")
+table(listings$airbnb_media, useNA = "ifany")
+table(listings$airbnb_cara, useNA = "ifany")
+```
+
+# 2.Use los mismos conjuntos de entrenamiento y prueba que utilizó en las hojas anteriores.
+
+```{r}
+set.seed(123)
+
+split_master <- initial_split(
+  listings,
+  prop = 0.80,
+  strata = airbnb_cara
+)
+
+train_data <- training(split_master)
+test_data  <- testing(split_master)
+
+dim(train_data)
+dim(test_data)
+```
+
+```{r}
+factor_cols <- names(train_data)[sapply(train_data, is.factor)]
+
+for (col in factor_cols) {
+  if (col %in% names(test_data)) {
+    test_data[[col]] <- factor(test_data[[col]], levels = levels(train_data[[col]]))
+  }
+}
+```
+
+
+```{r}
+vars_quitar <- intersect(
+  names(train_data),
+  c(
+    "id", "listing_url", "scrape_id", "source", "name", "description",
+    "neighborhood_overview", "picture_url", "host_id", "host_url",
+    "host_name", "host_location", "host_about",
+    "host_thumbnail_url", "host_picture_url",
+    "license", "amenities"
+  )
+)
+
+train_model <- train_data %>% select(-all_of(vars_quitar))
+test_model  <- test_data  %>% select(-all_of(vars_quitar))
+```
+
+
+```{r}
+vars_fuga <- intersect(
+  names(train_model),
+  c(
+    "price",                 
+    "categoria_precio",      
+    "airbnb_barata",         
+    "airbnb_media",          
+    "estimated_revenue_l365d" 
+  )
+)
+
+train_model <- train_model %>% select(-all_of(vars_fuga))
+test_model  <- test_model  %>% select(-all_of(vars_fuga))
+```
+
+```{r}
+train_model <- train_model %>%
+  mutate(
+    airbnb_cara = factor(
+      if_else(airbnb_cara == 1, "cara", "no_cara"),
+      levels = c("no_cara", "cara")
+    )
+  )
+
+test_model <- test_model %>%
+  mutate(
+    airbnb_cara = factor(
+      if_else(airbnb_cara == 1, "cara", "no_cara"),
+      levels = c("no_cara", "cara")
+    )
+  )
+```
+
+
+
+
+
