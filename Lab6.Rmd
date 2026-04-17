@@ -314,4 +314,65 @@ conf_mat(
 El modelo de regresión logística presenta un buen desempeño general, con una exactitud cercana al 86% y un AUC de 0.91, lo que indica una buena capacidad para diferenciar entre viviendas caras y no caras. Sin embargo, el modelo clasifica mejor las viviendas no caras que las caras. En particular, identifica correctamente cerca del 93.5% de las viviendas no caras, pero solo alrededor del 62% de las viviendas caras. Por lo tanto, aunque el modelo es útil para clasificar en general, su capacidad para detectar viviendas caras es más limitada cuando se usa un umbral de decisión de 0.5.
 
 
+# 4. Analice el modelo. Determine si hay multicolinealidad en las variables, y cuáles son las que aportan al modelo, por su valor de significación. Haga un análisis de correlación de las variables del modelo y especifique si el modelo se adapta bien a los datos.
+```{r}
+library(performance)
+library(car)
+
+glm_engine <- extract_fit_engine(fit_final)
+
+# VIF / colinealidad
+colin <- check_collinearity(glm_engine)
+colin
+```
+
+
+```{r}
+colin %>% 
+  arrange(desc(VIF))
+```
+
+```{r}
+library(car)
+
+anova_terms <- Anova(glm_engine, type = "II", test.statistic = "LR")
+anova_terms
+```
+
+```{r}
+library(broom)
+
+coeficientes <- tidy(glm_engine, conf.int = TRUE, exponentiate = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  arrange(p.value)
+
+coeficientes
+```
+
+```{r}
+library(corrplot)
+library(caret)
+library(tibble)
+library(tidyr)
+library(dplyr)
+
+receta_prep <- prep(receta_logit, training = train_model)
+train_baked <- bake(receta_prep, new_data = train_model)
+
+X_num <- train_baked %>%
+  select(where(is.numeric))
+
+cor_mat <- cor(X_num, use = "pairwise.complete.obs")
+
+corrplot(cor_mat, method = "color", type = "upper", tl.cex = 0.6)
+```
+
+
+Se analizó la presencia de multicolinealidad en los predictores mediante el factor de inflación de la varianza (VIF). En general, valores bajos de VIF indican que no existe una dependencia lineal excesiva entre las variables explicativas. Si la mayoría de los VIF se mantienen por debajo de 5, puede concluirse que no hay problemas graves de multicolinealidad en el modelo.
+
+Para identificar qué variables aportan significativamente al modelo, se evaluó la significación estadística de cada término mediante pruebas de razón de verosimilitud. Las variables con p-value menor a 0.05 se consideran relevantes para explicar la probabilidad de que una vivienda sea cara. En el caso de variables categóricas, esta evaluación debe hacerse a nivel global del término y no solo sobre coeficientes individuales.
+
+El análisis de correlación entre predictores permitió detectar posibles relaciones altas entre algunas variables numéricas. Correlaciones absolutas superiores a 0.7 sugieren asociación fuerte y posibles redundancias, lo que puede afectar la estabilidad de los coeficientes si además se acompaña de VIF elevados.
+
+En cuanto al ajuste general, el modelo presenta un desempeño bueno, con una exactitud aproximada de 85.8% y un AUC de 0.908, lo que indica una buena capacidad para discriminar entre viviendas caras y no caras. Sin embargo, el modelo muestra mejor capacidad para clasificar correctamente viviendas no caras que viviendas caras, por lo que su desempeño no es completamente equilibrado entre ambas clases. Si adicionalmente la prueba de Hosmer-Lemeshow no resulta significativa, puede concluirse que el modelo se adapta razonablemente bien a los datos.
 
