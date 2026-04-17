@@ -227,6 +227,91 @@ test_model <- test_model %>%
 ```
 
 
+# 3. Elabore un modelo de regresión logística para conocer si una vivienda es cara o no, utilizando el conjunto de entrenamiento y explique los resultados a los que llega. El experimento debe ser reproducible por lo que debe fijar que los conjuntos de entrenamiento y prueba sean los mismos siempre que se ejecute el código. Use validación cruzada. Ponga el umbral de decisión en 0.5.
+
+```{r}
+set.seed(123)
+
+folds <- vfold_cv(
+  train_model,
+  v = 5,
+  strata = airbnb_cara
+)
+```
+
+
+```{r}
+receta_logit <- recipe(airbnb_cara ~ ., data = train_model) %>%
+  step_date(all_date_predictors(), features = c("year", "month"), keep_original_cols = FALSE) %>%
+  step_unknown(all_nominal_predictors()) %>%
+  step_novel(all_nominal_predictors()) %>%
+  step_other(all_nominal_predictors(), threshold = 0.03) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_zv(all_predictors()) %>%
+  step_dummy(all_nominal_predictors())
+```
+
+```{r}
+modelo_logit <- logistic_reg(mode = "classification") %>%
+  set_engine("glm")
+
+wf_logit <- workflow() %>%
+  add_recipe(receta_logit) %>%
+  add_model(modelo_logit)
+```
+
+```{r}
+metricas_cv <- metric_set(accuracy, sens, spec, precision, f_meas, roc_auc)
+
+set.seed(123)
+
+res_cv <- fit_resamples(
+  wf_logit,
+  resamples = folds,
+  metrics = metricas_cv,
+  control = control_resamples(save_pred = TRUE)
+)
+
+collect_metrics(res_cv)
+```
+
+```{r}
+fit_final <- fit(wf_logit, data = train_model)
+
+pred_test <- predict(fit_final, new_data = test_model, type = "prob") %>%
+  bind_cols(test_model %>% select(airbnb_cara)) %>%
+  mutate(
+    .pred_class = if_else(.pred_cara >= 0.5, "cara", "no_cara"),
+    .pred_class = factor(.pred_class, levels = c("no_cara", "cara"))
+  )
+```
+
+```{r}
+metricas_test_clase <- metric_set(accuracy, sens, spec, precision, f_meas)
+
+metricas_test_clase(
+  pred_test,
+  truth = airbnb_cara,
+  estimate = .pred_class,
+  event_level = "second"
+)
+
+roc_auc(
+  pred_test,
+  truth = airbnb_cara,
+  .pred_cara,
+  event_level = "second"
+)
+
+conf_mat(
+  pred_test,
+  truth = airbnb_cara,
+  estimate = .pred_class
+)
+```
+
+
+El modelo de regresión logística presenta un buen desempeño general, con una exactitud cercana al 86% y un AUC de 0.91, lo que indica una buena capacidad para diferenciar entre viviendas caras y no caras. Sin embargo, el modelo clasifica mejor las viviendas no caras que las caras. En particular, identifica correctamente cerca del 93.5% de las viviendas no caras, pero solo alrededor del 62% de las viviendas caras. Por lo tanto, aunque el modelo es útil para clasificar en general, su capacidad para detectar viviendas caras es más limitada cuando se usa un umbral de decisión de 0.5.
 
 
 
