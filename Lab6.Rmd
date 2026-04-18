@@ -376,3 +376,202 @@ El análisis de correlación entre predictores permitió detectar posibles relac
 
 En cuanto al ajuste general, el modelo presenta un desempeño bueno, con una exactitud aproximada de 85.8% y un AUC de 0.908, lo que indica una buena capacidad para discriminar entre viviendas caras y no caras. Sin embargo, el modelo muestra mejor capacidad para clasificar correctamente viviendas no caras que viviendas caras, por lo que su desempeño no es completamente equilibrado entre ambas clases. Si adicionalmente la prueba de Hosmer-Lemeshow no resulta significativa, puede concluirse que el modelo se adapta razonablemente bien a los datos.
 
+# 5. Utilice el modelo con el conjunto de prueba y determine la eficiencia del algoritmo para clasificar.
+
+```{r}
+levels(train_model$airbnb_cara)
+levels(test_model$airbnb_cara)
+# Ajuste final con el conjunto de entrenamiento
+fit_final <- fit(wf_logit, data = train_model)
+```
+
+```{r}
+# Función para obtener predicciones con umbral 0.5
+obtener_pred <- function(fit, data, threshold = 0.5) {
+  probs <- predict(fit, new_data = data, type = "prob")
+  
+  tibble(
+    airbnb_cara = data$airbnb_cara,
+    .pred_cara = probs$.pred_cara,
+    .pred_class = if_else(.pred_cara >= threshold, "cara", "no_cara"),
+    .pred_class = factor(.pred_class, levels = c("no_cara", "cara"))
+  )
+}
+```
+
+```{r}
+obtener_pred <- function(fit, data, threshold = 0.5) {
+  probs <- predict(fit, new_data = data, type = "prob")
+  
+  tibble(
+    airbnb_cara = data$airbnb_cara,
+    .pred_cara = probs$.pred_cara,
+    .pred_class = factor(
+      if_else(probs$.pred_cara >= threshold, "cara", "no_cara"),
+      levels = c("no_cara", "cara")
+    )
+  )
+}
+```
+
+
+```{r}
+# Predicciones en entrenamiento y prueba
+pred_train <- obtener_pred(fit_final, train_model, threshold = 0.5)
+pred_test  <- obtener_pred(fit_final, test_model,  threshold = 0.5)
+```
+
+```{r}
+# Métricas de entrenamiento
+metricas_train <- bind_rows(
+  accuracy(pred_train, truth = airbnb_cara, estimate = .pred_class),
+  sens(pred_train, truth = airbnb_cara, estimate = .pred_class, event_level = "second"),
+  spec(pred_train, truth = airbnb_cara, estimate = .pred_class, event_level = "second"),
+  precision(pred_train, truth = airbnb_cara, estimate = .pred_class, event_level = "second"),
+  f_meas(pred_train, truth = airbnb_cara, estimate = .pred_class, event_level = "second"),
+  roc_auc(pred_train, truth = airbnb_cara, .pred_cara, event_level = "second")
+) %>%
+  select(.metric, .estimate) %>%
+  mutate(conjunto = "Entrenamiento")
+
+# Métricas de prueba
+metricas_test <- bind_rows(
+  accuracy(pred_test, truth = airbnb_cara, estimate = .pred_class),
+  sens(pred_test, truth = airbnb_cara, estimate = .pred_class, event_level = "second"),
+  spec(pred_test, truth = airbnb_cara, estimate = .pred_class, event_level = "second"),
+  precision(pred_test, truth = airbnb_cara, estimate = .pred_class, event_level = "second"),
+  f_meas(pred_test, truth = airbnb_cara, estimate = .pred_class, event_level = "second"),
+  roc_auc(pred_test, truth = airbnb_cara, .pred_cara, event_level = "second")
+) %>%
+  select(.metric, .estimate) %>%
+  mutate(conjunto = "Prueba")
+
+metricas_comparadas <- bind_rows(metricas_train, metricas_test) %>%
+  select(conjunto, .metric, .estimate)
+
+metricas_comparadas
+```
+
+```{r}
+# Error de clasificación = 1 - accuracy
+error_train <- 1 - (
+  accuracy(pred_train, truth = airbnb_cara, estimate = .pred_class) %>%
+    pull(.estimate)
+)
+
+error_test <- 1 - (
+  accuracy(pred_test, truth = airbnb_cara, estimate = .pred_class) %>%
+    pull(.estimate)
+)
+
+error_train
+error_test
+```
+
+```{r}
+conf_mat(pred_test, truth = airbnb_cara, estimate = .pred_class)
+```
+
+El modelo de regresión logística fue evaluado en el conjunto de prueba con un umbral de decisión de 0.5. Los resultados muestran una exactitud de 85.45%, lo que indica que el algoritmo clasifica correctamente la mayoría de las observaciones. El error de clasificación en prueba fue de 14.55%. En cuanto al desempeño por clase, el modelo presenta una sensibilidad de 62.24% para identificar viviendas caras y una especificidad de 93.46% para identificar viviendas no caras. Esto sugiere que el modelo tiene una mejor capacidad para reconocer viviendas no caras que viviendas caras.
+
+A partir de la matriz de confusión se observa que el modelo clasificó correctamente 10,630 viviendas no caras y 2,441 viviendas caras. Sin embargo, también dejó de identificar 1,481 viviendas caras, lo que confirma que su principal debilidad está en la detección de esta categoría.
+
+Respecto al sobreajuste, no se encontró evidencia importante del mismo, ya que el error en entrenamiento (14.11%) y el error en prueba (14.55%) son muy similares. La diferencia entre ambos es pequeña, lo que indica que el modelo generaliza adecuadamente y mantiene un desempeño estable sobre datos no vistos. En consecuencia, puede afirmarse que el modelo se adapta razonablemente bien a los datos, aunque su capacidad para identificar viviendas caras aún podría mejorarse.
+
+
+# 6. Explique si hay sobreajuste (overfitting) o no (recuerde usar para esto los errores del conjunto de prueba y de entrenamiento). Muestre las curvas de aprendizaje usando los errores de los conjuntos de entrenamiento y prueba.
+
+```{r}
+tibble(
+  conjunto = c("Entrenamiento", "Prueba"),
+  error = c(error_train, error_test)
+)
+```
+```{r}
+library(purrr)
+library(ggplot2)
+
+set.seed(123)
+
+fracciones <- seq(0.1, 1.0, by = 0.1)
+repeticiones <- 5
+
+curvas <- map_dfr(fracciones, function(p) {
+  map_dfr(1:repeticiones, function(rep) {
+    set.seed(1000 + round(100 * p) + rep)
+    
+    sub_train <- train_model %>%
+      group_by(airbnb_cara) %>%
+      slice_sample(prop = p) %>%
+      ungroup()
+    
+    fit_sub <- fit(wf_logit, data = sub_train)
+    
+    pred_sub_train <- obtener_pred(fit_sub, sub_train, threshold = 0.5)
+    pred_sub_test  <- obtener_pred(fit_sub, test_model, threshold = 0.5)
+    
+    err_train <- 1 - accuracy_vec(
+      truth = pred_sub_train$airbnb_cara,
+      estimate = pred_sub_train$.pred_class
+    )
+    
+    err_test <- 1 - accuracy_vec(
+      truth = pred_sub_test$airbnb_cara,
+      estimate = pred_sub_test$.pred_class
+    )
+    
+    tibble(
+      fraccion = p,
+      n = nrow(sub_train),
+      repeticion = rep,
+      error_train = err_train,
+      error_test = err_test
+    )
+  })
+})
+```
+
+```{r}
+curvas_resumen <- curvas %>%
+  group_by(fraccion, n) %>%
+  summarise(
+    error_train = mean(error_train),
+    error_test = mean(error_test),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(
+    cols = c(error_train, error_test),
+    names_to = "conjunto",
+    values_to = "error"
+  ) %>%
+  mutate(
+    conjunto = dplyr::recode(
+      conjunto,
+      error_train = "Entrenamiento",
+      error_test = "Prueba"
+    )
+  )
+
+curvas_resumen
+```
+
+```{r}
+ggplot(curvas_resumen, aes(x = n, y = error, color = conjunto)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  labs(
+    title = "Curvas de aprendizaje - Regresión logística",
+    x = "Tamaño del conjunto de entrenamiento",
+    y = "Error de clasificación",
+    color = "Conjunto"
+  ) +
+  theme_minimal()
+```
+
+ara evaluar la presencia de sobreajuste, se compararon los errores de clasificación obtenidos en los conjuntos de entrenamiento y prueba. El error en entrenamiento fue de 0.1411, mientras que el error en prueba fue de 0.1455. La diferencia entre ambos es pequeña, aproximadamente 0.0044, lo que indica que el modelo presenta un desempeño muy similar en ambos conjuntos.
+
+Las curvas de aprendizaje muestran que, a medida que aumenta el tamaño del conjunto de entrenamiento, tanto el error de entrenamiento como el error de prueba tienden a estabilizarse. Además, la separación entre ambas curvas es reducida y relativamente constante. Este comportamiento sugiere que el modelo no presenta evidencia importante de sobreajuste, ya que no existe una brecha grande entre el desempeño en entrenamiento y en prueba.
+
+En consecuencia, puede afirmarse que la regresión logística generaliza adecuadamente a datos no vistos y se adapta razonablemente bien a los datos disponibles. Sin embargo, dado que ambas curvas se estabilizan en niveles muy parecidos, también se sugiere que las mejoras futuras del modelo no dependerían solo de aumentar el tamaño de la muestra, sino de incorporar mejores predictores o explorar modelos alternativos.
+
+No se encontró evidencia de sobreajuste en el modelo, ya que los errores de entrenamiento y prueba son muy parecidos y las curvas de aprendizaje permanecen cercanas y estables. Esto indica que el modelo tiene buena capacidad de generalización y un ajuste razonable a los datos.
