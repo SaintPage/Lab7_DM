@@ -124,17 +124,22 @@ if ("price" %in% names(listings)) {
         TRUE                       ~ 0L
       ),
       airbnb_cara = case_when(
-        is.na(price)               ~ NA_integer_,
-        price > 323                ~ 1L,
-        TRUE                       ~ 0L
+        is.na(price)               ~ NA_character_,
+        price > 323                ~ "cara",
+        TRUE                       ~ "no_cara"
       )
     ) %>%
     mutate(
       categoria_precio = factor(
         categoria_precio,
         levels = c("Barata", "Media", "Cara")
+      ),
+      airbnb_cara = factor(
+        airbnb_cara,
+        levels = c("no_cara", "cara")
       )
-    )
+    ) %>%
+    filter(!is.na(airbnb_cara))
 }
 ```
 
@@ -490,36 +495,38 @@ tibble(
 ```{r}
 library(purrr)
 library(ggplot2)
+library(dplyr)
+library(tidyr)
 
 set.seed(123)
 
-fracciones <- seq(0.1, 1.0, by = 0.1)
-repeticiones <- 5
+fracciones <- seq(0.2, 1.0, by = 0.2)
+repeticiones <- 3
 
 curvas <- map_dfr(fracciones, function(p) {
   map_dfr(1:repeticiones, function(rep) {
     set.seed(1000 + round(100 * p) + rep)
-    
+
     sub_train <- train_model %>%
       group_by(airbnb_cara) %>%
       slice_sample(prop = p) %>%
       ungroup()
-    
+
     fit_sub <- fit(wf_logit, data = sub_train)
-    
+
     pred_sub_train <- obtener_pred(fit_sub, sub_train, threshold = 0.5)
     pred_sub_test  <- obtener_pred(fit_sub, test_model, threshold = 0.5)
-    
+
     err_train <- 1 - accuracy_vec(
       truth = pred_sub_train$airbnb_cara,
       estimate = pred_sub_train$.pred_class
     )
-    
+
     err_test <- 1 - accuracy_vec(
       truth = pred_sub_test$airbnb_cara,
       estimate = pred_sub_test$.pred_class
     )
-    
+
     tibble(
       fraccion = p,
       n = nrow(sub_train),
@@ -575,3 +582,298 @@ Las curvas de aprendizaje muestran que, a medida que aumenta el tamaño del conj
 En consecuencia, puede afirmarse que la regresión logística generaliza adecuadamente a datos no vistos y se adapta razonablemente bien a los datos disponibles. Sin embargo, dado que ambas curvas se estabilizan en niveles muy parecidos, también se sugiere que las mejoras futuras del modelo no dependerían solo de aumentar el tamaño de la muestra, sino de incorporar mejores predictores o explorar modelos alternativos.
 
 No se encontró evidencia de sobreajuste en el modelo, ya que los errores de entrenamiento y prueba son muy parecidos y las curvas de aprendizaje permanecen cercanas y estables. Esto indica que el modelo tiene buena capacidad de generalización y un ajuste razonable a los datos.
+
+
+# 7. Haga un tuneo del modelo para determinar los mejores parámetros, recuerde que los modelos de regresión logística se pueden regularizar como los de regresión lineal.
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(glmnet)
+
+tidymodels_prefer()
+```
+
+```{r}
+set.seed(123)
+
+split_master <- initial_split(
+  listings,
+  prop = 0.80,
+  strata = airbnb_cara
+)
+
+train_data <- training(split_master)
+test_data  <- testing(split_master)
+```
+
+```{r}
+vars_quitar <- intersect(
+  names(train_data),
+  c(
+    "id", "listing_url", "scrape_id", "source", "name", "description",
+    "neighborhood_overview", "picture_url", "host_id", "host_url",
+    "host_name", "host_location", "host_about",
+    "host_thumbnail_url", "host_picture_url",
+    "license", "amenities"
+  )
+)
+
+train_model <- train_data %>% select(-all_of(vars_quitar))
+test_model  <- test_data  %>% select(-all_of(vars_quitar))
+```
+
+```{r}
+vars_fuga <- intersect(
+  names(train_model),
+  c(
+    "price",
+    "categoria_precio",
+    "airbnb_barata",
+    "airbnb_media",
+    "estimated_revenue_l365d"
+  )
+)
+
+train_model <- train_model %>% select(-all_of(vars_fuga))
+test_model  <- test_model  %>% select(-all_of(vars_fuga))
+```
+
+```{r}
+train_model <- train_model %>%
+  mutate(across(where(is.logical), ~ factor(.x, levels = c(FALSE, TRUE))))
+
+test_model <- test_model %>%
+  mutate(across(where(is.logical), ~ factor(.x, levels = c(FALSE, TRUE))))
+```
+
+```{r}
+factor_cols <- names(train_model)[sapply(train_model, is.factor)]
+
+for (col in factor_cols) {
+  if (col %in% names(test_model)) {
+    test_model[[col]] <- factor(test_model[[col]], levels = levels(train_model[[col]]))
+  }
+}
+
+```
+
+```{r}
+sum(is.na(train_model$airbnb_cara))
+sum(is.na(test_model$airbnb_cara))
+
+table(train_model$airbnb_cara, useNA = "ifany")
+table(test_model$airbnb_cara, useNA = "ifany")
+```
+```{r}
+receta_logit_simple <- recipe(airbnb_cara ~ ., data = train_model) %>%
+  step_date(all_date_predictors(), features = c("year", "month"), keep_original_cols = FALSE) %>%
+  step_unknown(all_nominal_predictors()) %>%
+  step_novel(all_nominal_predictors()) %>%
+  step_other(all_nominal_predictors(), threshold = 0.03) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_zv(all_predictors()) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors())
+
+modelo_logit_simple <- logistic_reg(
+  mode = "classification"
+) %>%
+  set_engine("glm")
+
+wf_logit_simple <- workflow() %>%
+  add_recipe(receta_logit_simple) %>%
+  add_model(modelo_logit_simple)
+
+fit_final_simple <- fit(wf_logit_simple, data = train_model)
+```
+
+
+```{r}
+prep_glmnet <- prep(receta_glmnet, training = train_model)
+train_baked <- bake(prep_glmnet, new_data = NULL)
+
+sum(is.na(train_baked))
+table(sapply(train_baked, class))
+```
+
+```{r}
+modelo_glmnet <- logistic_reg(
+  mode = "classification",
+  penalty = tune(),
+  mixture = tune()
+) %>%
+  set_engine("glmnet")
+```
+
+```{r}
+wf_glmnet <- workflow() %>%
+  add_recipe(receta_glmnet) %>%
+  add_model(modelo_glmnet)
+```
+
+```{r}
+set.seed(123)
+
+grid_glmnet <- grid_regular(
+  penalty(range = c(-4, 1)),
+  mixture(range = c(0, 1)),
+  levels = c(10, 5)
+)
+
+metricas_tuneo <- metric_set(roc_auc, accuracy)
+```
+
+```{r}
+set.seed(123)
+
+res_tune_glmnet <- tune_grid(
+  wf_glmnet,
+  resamples = folds,
+  grid = grid_glmnet,
+  metrics = metricas_tuneo,
+  control = control_grid(save_pred = TRUE)
+)
+```
+
+```{r}
+
+collect_metrics(res_tune_glmnet)
+show_best(res_tune_glmnet, metric = "roc_auc", n = 10)
+select_best(res_tune_glmnet, metric = "roc_auc")
+```
+```{r}
+mejor_glmnet <- select_best(res_tune_glmnet, metric = "roc_auc")
+
+wf_final_glmnet <- finalize_workflow(
+  wf_glmnet,
+  mejor_glmnet
+)
+
+fit_final_glmnet <- fit(wf_final_glmnet, data = train_model)
+```
+
+```{r}
+pred_test_glmnet <- predict(fit_final_glmnet, new_data = test_model, type = "prob") %>%
+  bind_cols(test_model %>% select(airbnb_cara)) %>%
+  mutate(
+    .pred_class = if_else(.pred_cara >= 0.5, "cara", "no_cara"),
+    .pred_class = factor(.pred_class, levels = c("no_cara", "cara"))
+  )
+```
+
+```{r}
+metricas_glmnet_test <- bind_rows(
+  accuracy(pred_test_glmnet, truth = airbnb_cara, estimate = .pred_class),
+  sens(pred_test_glmnet, truth = airbnb_cara, estimate = .pred_class, event_level = "second"),
+  spec(pred_test_glmnet, truth = airbnb_cara, estimate = .pred_class, event_level = "second"),
+  precision(pred_test_glmnet, truth = airbnb_cara, estimate = .pred_class, event_level = "second"),
+  f_meas(pred_test_glmnet, truth = airbnb_cara, estimate = .pred_class, event_level = "second"),
+  roc_auc(pred_test_glmnet, truth = airbnb_cara, .pred_cara, event_level = "second")
+)
+
+metricas_glmnet_test
+```
+
+```{r}
+conf_mat(pred_test_glmnet, truth = airbnb_cara, estimate = .pred_class)
+```
+
+
+```{r}
+error_glmnet_test <- 1 - (
+  accuracy(pred_test_glmnet, truth = airbnb_cara, estimate = .pred_class) %>%
+    pull(.estimate)
+)
+
+error_glmnet_test
+
+```
+
+```{r}
+pred_test_simple <- predict(fit_final_simple, new_data = test_model, type = "prob") %>%
+  bind_cols(test_model %>% select(airbnb_cara)) %>%
+  mutate(
+    .pred_class = if_else(.pred_cara >= 0.5, "cara", "no_cara"),
+    .pred_class = factor(.pred_class, levels = c("no_cara", "cara"))
+  )
+```
+
+Se realizó un tuneo de la regresión logística regularizada mediante validación cruzada de 5 pliegues, buscando los mejores valores de los hiperparámetros penalty y mixture. El mejor modelo fue el que obtuvo penalty = 0.0001 y mixture = 0.25, con un ROC AUC promedio de aproximadamente 0.9037.
+
+El valor de mixture = 0.25 indica que el modelo óptimo corresponde a una regularización tipo elastic net, más cercana a ridge que a lasso. Por su parte, el valor pequeño de penalty sugiere que la cantidad de regularización necesaria es baja, por lo que el modelo original ya tenía un buen comportamiento y solo requería un ajuste leve para estabilizar sus coeficientes.
+
+Posteriormente, el mejor modelo se ajustó con todo el conjunto de entrenamiento y se evaluó sobre el conjunto de prueba usando un umbral de decisión de 0.5. Finalmente, sus métricas se compararon con las de la regresión logística no regularizada para determinar si la regularización mejoró el desempeño predictivo.
+
+
+Se realizó un tuneo de la regresión logística regularizada mediante validación cruzada de 5 pliegues. El mejor modelo se obtuvo con penalty = 0.0001 y mixture = 0.25, lo que corresponde a una regularización tipo elastic net cercana a ridge y de intensidad muy baja. Esto sugiere que el modelo requería solo una penalización ligera para estabilizar sus coeficientes.
+
+Al evaluar el modelo ajustado con esos parámetros sobre el conjunto de prueba, se obtuvo una exactitud de 85.06%, una sensibilidad de 61.27%, una especificidad de 93.15% y un AUC de 0.9022. Estos resultados indican que el modelo regularizado presenta un buen desempeño general, aunque sigue mostrando una mejor capacidad para identificar viviendas no caras que viviendas caras.
+
+En términos prácticos, el tuneo no produjo una mejora sustancial en el desempeño predictivo con respecto al modelo logístico simple previamente estimado, ya que las métricas obtenidas son muy similares e incluso ligeramente inferiores en el conjunto de prueba. Por tanto, la regularización sí permite obtener un modelo más estable y controlado, pero en este caso no generó una ganancia importante en capacidad de clasificación.
+
+# 8.Haga un análisis de la eficiencia del algoritmo usando una matriz de confusión. Tenga en cuenta la fectividad, donde el algoritmo se equivocó más, donde se equivocó menos y la importancia que tienen os errores, el tiempo y la memoria consumida.
+```{r}
+conf_mat(pred_test, truth = airbnb_cara, estimate = .pred_class)
+
+bind_rows(
+  accuracy(pred_test, truth = airbnb_cara, estimate = .pred_class),
+  sens(pred_test, truth = airbnb_cara, estimate = .pred_class, event_level = "second"),
+  spec(pred_test, truth = airbnb_cara, estimate = .pred_class, event_level = "second"),
+  precision(pred_test, truth = airbnb_cara, estimate = .pred_class, event_level = "second"),
+  f_meas(pred_test, truth = airbnb_cara, estimate = .pred_class, event_level = "second"),
+  roc_auc(pred_test, truth = airbnb_cara, .pred_cara, event_level = "second")
+)
+```
+```{r}
+tiempo_modelo <- system.time({
+  fit_final_simple <- fit(wf_logit_simple, data = train_model)
+
+  pred_test_simple <- predict(fit_final_simple, new_data = test_model, type = "prob") %>%
+    bind_cols(test_model %>% select(airbnb_cara)) %>%
+    mutate(
+      .pred_class = if_else(.pred_cara >= 0.5, "cara", "no_cara"),
+      .pred_class = factor(.pred_class, levels = c("no_cara", "cara"))
+    )
+
+  conf_mat(pred_test_simple, truth = airbnb_cara, estimate = .pred_class)
+})
+
+tiempo_modelo
+```
+
+
+```{r}
+object.size(fit_final_simple)
+object.size(pred_test_simple)
+```
+
+```{r}
+as.numeric(object.size(fit_final_simple)) / 1024^2
+as.numeric(object.size(pred_test_simple)) / 1024^2
+```
+
+```{r}
+library(profvis)
+
+profvis({
+  fit_final_simple <- fit(wf_logit_simple, data = train_model)
+
+  pred_test_simple <- predict(fit_final_simple, new_data = test_model, type = "prob") %>%
+    bind_cols(test_model %>% select(airbnb_cara)) %>%
+    mutate(
+      .pred_class = if_else(.pred_cara >= 0.5, "cara", "no_cara"),
+      .pred_class = factor(.pred_class, levels = c("no_cara", "cara"))
+    )
+
+  conf_mat(pred_test_simple, truth = airbnb_cara, estimate = .pred_class)
+})
+```
+
+La eficiencia del algoritmo se evaluó mediante la matriz de confusión del conjunto de prueba. El modelo clasificó correctamente 10,630 viviendas no caras y 2,441 viviendas caras. Los errores se concentraron principalmente en 1,481 viviendas caras que fueron clasificadas como no caras, mientras que en menor medida se presentaron 744 viviendas no caras clasificadas como caras. Esto indica que el algoritmo se equivoca más al identificar la clase “cara” que la clase “no cara”.
+
+En términos de desempeño global, el modelo alcanzó una exactitud de 85.45%, sensibilidad de 62.24%, especificidad de 93.46%, precisión de 76.64% y un AUC de 0.9081. Estos resultados muestran que el algoritmo es efectivo en general y posee una muy buena capacidad de discriminación. Sin embargo, su principal debilidad está en detectar viviendas caras, ya que el error más frecuente corresponde a falsos negativos.
+
+Desde el punto de vista de la importancia de los errores, clasificar una vivienda cara como no cara puede afectar la correcta segmentación del mercado y llevar a subestimar inmuebles de precio alto. Este fue el tipo de error más frecuente del modelo. En cambio, clasificar una vivienda no cara como cara ocurrió con menor frecuencia, por lo que ese error fue menos problemático.
+
+En cuanto al costo computacional, el tiempo total de ejecución fue de 24.01 segundos. El tamaño en memoria del modelo ajustado fue de aproximadamente 266.4 MB, mientras que el objeto de predicciones ocupó cerca de 0.35 MB. Esto sugiere que el mayor consumo de recursos se encuentra en el ajuste del modelo y en el preprocesamiento de los datos, especialmente por la transformación de variables y la creación de variables dummy. El perfil obtenido con profvis confirma que el principal costo computacional se concentra en esas etapas del workflow. En general, puede concluirse que la regresión logística presenta un costo computacional moderado y razonable frente al tamaño y complejidad del conjunto de datos.
